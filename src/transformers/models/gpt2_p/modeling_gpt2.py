@@ -238,6 +238,7 @@ class GPT2Attention(nn.Module):
             else:
                 curr_past_key_value = past_key_values
 
+        shape_kv = None
         if is_cross_attention:
             if not hasattr(self, "q_attn"):
                 raise ValueError(
@@ -254,22 +255,29 @@ class GPT2Attention(nn.Module):
             else:
                 key_states, value_states = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
                 shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
-                key_states = key_states.view(shape_kv).transpose(1, 2)
-                value_states = value_states.view(shape_kv).transpose(1, 2)
+                key_states = key_states.view(shape_kv)
+                value_states = value_states.view(shape_kv)
         else:
             query_states, key_states, value_states = self.c_attn(hidden_states).split(self.split_size, dim=2)
             shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
-            key_states = key_states.view(shape_kv).transpose(1, 2)
-            value_states = value_states.view(shape_kv).transpose(1, 2)
+            key_states = key_states.view(shape_kv)
+            value_states = value_states.view(shape_kv)
 
         shape_q = (*query_states.shape[:-1], -1, self.head_dim)
-        query_states = query_states.view(shape_q).transpose(1, 2)
+        query_states = query_states.view(shape_q)
 
         # Apply hooks on the per-step Q/K/V before any cache update so hooks capture only
         # the current step activations (not the accumulated cached states).
         query_states = self.hook_q(query_states)
         key_states = self.hook_k(key_states)
         value_states = self.hook_v(value_states)
+        
+        # Hook before transpose to meet shape convention requirements.
+        query_states = query_states.transpose(1, 2)
+        
+        if shape_kv is not None:
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
 
         if (past_key_values is not None and not is_cross_attention) or (
             past_key_values is not None and is_cross_attention and not is_updated

@@ -254,22 +254,39 @@ class GPT2Attention(nn.Module):
             else:
                 key_states, value_states = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
                 shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
-                key_states = key_states.view(shape_kv).transpose(1, 2)
-                value_states = value_states.view(shape_kv).transpose(1, 2)
+                key_states = key_states.view(shape_kv)
+                # New hook place with shape of [batch_size, seq_len, n_head, head_dim]
+                key_states = self.hook_k(key_states)
+                key_states = key_states.transpose(1, 2)
+                value_states = value_states.view(shape_kv)
+                # New hook place with shape of [batch_size, seq_len, n_head, head_dim]
+                value_states = self.hook_v(value_states)
+                value_states = value_states.transpose(1, 2)
         else:
             query_states, key_states, value_states = self.c_attn(hidden_states).split(self.split_size, dim=2)
             shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
-            key_states = key_states.view(shape_kv).transpose(1, 2)
-            value_states = value_states.view(shape_kv).transpose(1, 2)
+            key_states = key_states.view(shape_kv)
+            # New hook place with shape of [batch_size, seq_len, n_head, head_dim]
+            key_states = self.hook_k(key_states)
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.view(shape_kv)
+            # New hook place with shape of [batch_size, seq_len, n_head, head_dim]
+            value_states = self.hook_v(value_states)
+            value_states = value_states.transpose(1, 2)
 
         shape_q = (*query_states.shape[:-1], -1, self.head_dim)
-        query_states = query_states.view(shape_q).transpose(1, 2)
+        query_states = query_states.view(shape_q)
+        # New hook place with shape of [batch_size, seq_len, n_head, head_dim]
+        query_states = self.hook_q(query_states)
+        query_states = query_states.transpose(1, 2)
 
         # Apply hooks on the per-step Q/K/V before any cache update so hooks capture only
         # the current step activations (not the accumulated cached states).
-        query_states = self.hook_q(query_states)
-        key_states = self.hook_k(key_states)
-        value_states = self.hook_v(value_states)
+        # Below is the old hook place with shape of [batch_size, n_head, seq_len, head_dim],
+        # Switch to match TransformerLens
+        # query_states = self.hook_q(query_states)
+        # key_states = self.hook_k(key_states)
+        # value_states = self.hook_v(value_states)
 
         if (past_key_values is not None and not is_cross_attention) or (
             past_key_values is not None and is_cross_attention and not is_updated

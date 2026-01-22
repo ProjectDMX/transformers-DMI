@@ -1423,11 +1423,112 @@ class HookedGPT2Model(GPT2Model, HookedRootModule):
         self.mod_dict.update(alias_mod_entries)
 
 
+class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
+    """GPT-2 LMHead variant with TransformerLens-style hook management."""
+
+    def __init__(self, config):
+        GPT2LMHeadModel.__init__(self, config)
+        # Extra hook points for host_engine integration
+        self.token_ids = HookPoint()
+        self.final_logits = HookPoint()
+        self.setup()
+        self._register_aliases()
+
+    def _register_aliases(self) -> None:
+        """Provide TransformerLens-compatible aliases for block-level hook names."""
+
+        alias_entries = {}
+        alias_mod_entries = {}
+        for name, hook_point in list(self.hook_dict.items()):
+            if name.startswith("transformer."):
+                short_name = name[len("transformer."):]
+                alias_entries[short_name] = hook_point
+                alias_mod_entries[short_name] = hook_point
+                if short_name.startswith("blocks."):
+                    legacy_name = f"h.{short_name[len('blocks.'):]}"
+                    alias_entries[legacy_name] = hook_point
+                    alias_mod_entries[legacy_name] = hook_point
+            elif name.startswith("blocks."):
+                legacy_name = f"h.{name[len('blocks.'):]}"
+                alias_entries[legacy_name] = hook_point
+                alias_mod_entries[legacy_name] = hook_point
+        self.hook_dict.update(alias_entries)
+        self.mod_dict.update(alias_mod_entries)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs,
+    ) -> Union[tuple, CausalLMOutputWithCrossAttentions]:
+        if input_ids is not None:
+            input_ids = self.token_ids(input_ids)
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        transformer_outputs = self.transformer(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            cache_position=cache_position,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        hidden_states = transformer_outputs[0]
+
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self.final_logits(logits)
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(
+                logits,
+                labels,
+                vocab_size=self.config.vocab_size,
+                **kwargs,
+            )
+
+        if not return_dict:
+            output = (logits,) + transformer_outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            attentions=transformer_outputs.attentions,
+            cross_attentions=transformer_outputs.cross_attentions,
+        )
+
+
 __all__ = [
     "GPT2DoubleHeadsModel",
     "GPT2ForQuestionAnswering",
     "GPT2ForSequenceClassification",
     "GPT2ForTokenClassification",
+    "HookedGPT2LMHeadModel",
     "HookedGPT2Model",
     "GPT2LMHeadModel",
     "GPT2Model",

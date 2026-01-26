@@ -1407,20 +1407,21 @@ class HookedGPT2Model(GPT2Model, HookedRootModule):
     def __init__(self, config):
         GPT2Model.__init__(self, config)
         self.setup()
-        self._register_aliases()
+        self._normalize_hook_names()
 
-    def _register_aliases(self) -> None:
-        """Provide TransformerLens-compatible aliases for block-level hook names."""
+    def _normalize_hook_names(self) -> None:
+        """Drop legacy aliases and normalize hook names for DB usage."""
 
-        alias_entries = {}
-        alias_mod_entries = {}
+        normalized: dict[str, HookPoint] = {}
         for name, hook_point in list(self.hook_dict.items()):
-            if name.startswith("blocks."):
-                legacy_name = f"h.{name[len('blocks.'):]}"
-                alias_entries[legacy_name] = hook_point
-                alias_mod_entries[legacy_name] = hook_point
-        self.hook_dict.update(alias_entries)
-        self.mod_dict.update(alias_mod_entries)
+            if name.startswith("transformer."):
+                name = name[len("transformer."):]
+            if name.startswith("h."):
+                # Drop legacy TL alias names
+                continue
+            hook_point.name = name
+            normalized[name] = hook_point
+        self.hook_dict = normalized
 
 
 class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
@@ -1432,28 +1433,21 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
         self.token_ids = HookPoint()
         self.final_logits = HookPoint()
         self.setup()
-        self._register_aliases()
+        self._normalize_hook_names()
 
-    def _register_aliases(self) -> None:
-        """Provide TransformerLens-compatible aliases for block-level hook names."""
+    def _normalize_hook_names(self) -> None:
+        """Drop legacy aliases and normalize hook names for DB usage."""
 
-        alias_entries = {}
-        alias_mod_entries = {}
+        normalized: dict[str, HookPoint] = {}
         for name, hook_point in list(self.hook_dict.items()):
             if name.startswith("transformer."):
-                short_name = name[len("transformer."):]
-                alias_entries[short_name] = hook_point
-                alias_mod_entries[short_name] = hook_point
-                if short_name.startswith("blocks."):
-                    legacy_name = f"h.{short_name[len('blocks.'):]}"
-                    alias_entries[legacy_name] = hook_point
-                    alias_mod_entries[legacy_name] = hook_point
-            elif name.startswith("blocks."):
-                legacy_name = f"h.{name[len('blocks.'):]}"
-                alias_entries[legacy_name] = hook_point
-                alias_mod_entries[legacy_name] = hook_point
-        self.hook_dict.update(alias_entries)
-        self.mod_dict.update(alias_mod_entries)
+                name = name[len("transformer."):]
+            if name.startswith("h."):
+                # Drop legacy TL alias names
+                continue
+            hook_point.name = name
+            normalized[name] = hook_point
+        self.hook_dict = normalized
 
     def forward(
         self,

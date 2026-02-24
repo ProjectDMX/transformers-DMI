@@ -562,24 +562,81 @@ class HookedQwen3Model(Qwen3Model, HookedRootModule):
     def __init__(self, config):
         Qwen3Model.__init__(self, config)
         self.setup()
-        self._register_aliases()
 
-    def _register_aliases(self) -> None:
-        """Provide TransformerLens-compatible aliases for layer-level hook names."""
 
-        alias_entries = {}
-        alias_mod_entries = {}
+class HookedQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
+    """Qwen3 CausalLM variant with TransformerLens-style hook management."""
+
+    def __init__(self, config):
+        Qwen3ForCausalLM.__init__(self, config)
+        self.token_ids = HookPoint()
+        self.final_logits = HookPoint()
+        self.setup()
+        self._normalize_hook_names()
+
+    def _normalize_hook_names(self) -> None:
+        """Drop `model.` prefix so names match `HookedQwen3Model`."""
+
+        normalized_hooks: dict[str, HookPoint] = {}
         for name, hook_point in list(self.hook_dict.items()):
-            if name.startswith("layers."):
-                tail = name[len("layers.") :]
-                blocks_name = f"blocks.{tail}"
-                h_name = f"h.{tail}"
-                alias_entries[blocks_name] = hook_point
-                alias_entries[h_name] = hook_point
-                alias_mod_entries[blocks_name] = hook_point
-                alias_mod_entries[h_name] = hook_point
-        self.hook_dict.update(alias_entries)
-        self.mod_dict.update(alias_mod_entries)
+            if name.startswith("model."):
+                name = name[len("model.") :]
+            hook_point.name = name
+            normalized_hooks[name] = hook_point
+        self.hook_dict = normalized_hooks
+
+        normalized_mods: dict[str, nn.Module] = {}
+        for name, module in list(self.mod_dict.items()):
+            if name.startswith("model."):
+                name = name[len("model.") :]
+            normalized_mods[name] = module
+        self.mod_dict = normalized_mods
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> CausalLMOutputWithPast:
+        if input_ids is not None:
+            input_ids = self.token_ids(input_ids)
+
+        outputs: BaseModelOutputWithPast = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self.final_logits(logits)
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 class Qwen3ForSequenceClassification(GenericForSequenceClassification, Qwen3PreTrainedModel):
@@ -596,6 +653,7 @@ class Qwen3ForQuestionAnswering(GenericForQuestionAnswering, Qwen3PreTrainedMode
 
 __all__ = [
     "Qwen3ForCausalLM",
+    "HookedQwen3ForCausalLM",
     "Qwen3ForQuestionAnswering",
     "Qwen3PreTrainedModel",
     "Qwen3Model",

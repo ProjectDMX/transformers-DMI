@@ -290,10 +290,11 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
+        self.hook_resid_pre(hidden_states)
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.hook_ln1(hidden_states)
-        attn_input = self.hook_resid_pre(hidden_states)
+        attn_input = hidden_states
         # Self Attention
         attn_output, _ = self.self_attn(
             hidden_states=attn_input,

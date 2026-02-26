@@ -394,9 +394,10 @@ class GPT2Block(GradientCheckpointingLayer):
         **kwargs,
     ) -> Union[tuple[torch.Tensor], Optional[tuple[torch.Tensor, tuple[torch.FloatTensor, ...]]]]:
         residual = hidden_states
+        hidden_states = self.hook_resid_pre(hidden_states)
         hidden_states = self.ln_1(hidden_states)
         hidden_states = self.hook_ln1(hidden_states)
-        attn_input = self.hook_resid_pre(hidden_states)
+        attn_input = hidden_states
         attn_output, self_attn_weights = self.attn(
             attn_input,
             past_key_values=past_key_values,

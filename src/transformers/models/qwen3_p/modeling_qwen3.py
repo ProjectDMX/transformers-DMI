@@ -593,6 +593,53 @@ class HookedQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
             normalized_mods[name] = module
         self.mod_dict = normalized_mods
 
+    def get_hook_specs(self) -> list:
+        """Return all monitoring hook specs in forward() firing order.
+
+        Used by generate_with_monitoring to install register_forward_hook
+        callbacks and to push_meta in the correct FIFO order.
+        Names match the normalized form produced by _normalize_hook_names.
+        """
+        import torch
+        from monitoring.ring_transport import (
+            HookSpec,
+            HOOK_TYPE_EMBED, HOOK_TYPE_FINAL_LN,
+            HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_Q, HOOK_TYPE_K,
+            HOOK_TYPE_V, HOOK_TYPE_ATTN_SCORES, HOOK_TYPE_PATTERN,
+            HOOK_TYPE_Z, HOOK_TYPE_RESULT, HOOK_TYPE_ATTN_OUT,
+            HOOK_TYPE_RESID_MID, HOOK_TYPE_LN2, HOOK_TYPE_MLP_IN,
+            HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_POST,
+            HOOK_TYPE_TOKEN_IDS, HOOK_TYPE_FINAL_LOGITS,
+        )
+        m = self.model
+        is_eager = (self.config._attn_implementation == "eager")
+        specs = []
+        # token_ids fires first (before embed) — must be first in FIFO
+        specs.append(HookSpec("token_ids",  HOOK_TYPE_TOKEN_IDS, self.token_ids, dtype=torch.long))
+        specs.append(HookSpec("hook_embed", HOOK_TYPE_EMBED, m.hook_embed))
+        for i, layer in enumerate(m.layers):
+            specs.append(HookSpec(f"layers.{i}.hook_resid_pre",  HOOK_TYPE_RESID_PRE,  layer.hook_resid_pre))
+            specs.append(HookSpec(f"layers.{i}.hook_ln1",        HOOK_TYPE_LN1,        layer.hook_ln1))
+            # Attention: Q, K, V fire in this order in Qwen3Attention.forward()
+            specs.append(HookSpec(f"layers.{i}.self_attn.hook_q", HOOK_TYPE_Q, layer.self_attn.hook_q))
+            specs.append(HookSpec(f"layers.{i}.self_attn.hook_k", HOOK_TYPE_K, layer.self_attn.hook_k))
+            specs.append(HookSpec(f"layers.{i}.self_attn.hook_v", HOOK_TYPE_V, layer.self_attn.hook_v))
+            if is_eager:
+                specs.append(HookSpec(f"layers.{i}.self_attn.hook_attn_scores", HOOK_TYPE_ATTN_SCORES, layer.self_attn.hook_attn_scores))
+                specs.append(HookSpec(f"layers.{i}.self_attn.hook_pattern",     HOOK_TYPE_PATTERN,     layer.self_attn.hook_pattern))
+            specs.append(HookSpec(f"layers.{i}.self_attn.hook_z",      HOOK_TYPE_Z,          layer.self_attn.hook_z))
+            specs.append(HookSpec(f"layers.{i}.self_attn.hook_result",  HOOK_TYPE_RESULT,     layer.self_attn.hook_result))
+            specs.append(HookSpec(f"layers.{i}.hook_attn_out",    HOOK_TYPE_ATTN_OUT,   layer.hook_attn_out))
+            specs.append(HookSpec(f"layers.{i}.hook_resid_mid",   HOOK_TYPE_RESID_MID,  layer.hook_resid_mid))
+            specs.append(HookSpec(f"layers.{i}.hook_ln2",         HOOK_TYPE_LN2,        layer.hook_ln2))
+            specs.append(HookSpec(f"layers.{i}.hook_mlp_in",      HOOK_TYPE_MLP_IN,     layer.hook_mlp_in))
+            specs.append(HookSpec(f"layers.{i}.hook_mlp_out",     HOOK_TYPE_MLP_OUT,    layer.hook_mlp_out))
+            specs.append(HookSpec(f"layers.{i}.hook_resid_post",  HOOK_TYPE_RESID_POST, layer.hook_resid_post))
+        specs.append(HookSpec("hook_final_ln",  HOOK_TYPE_FINAL_LN,     m.hook_final_ln))
+        # final_logits fires last — must be last in FIFO
+        specs.append(HookSpec("final_logits",   HOOK_TYPE_FINAL_LOGITS, self.final_logits))
+        return specs
+
     @can_return_tuple
     @auto_docstring
     def forward(

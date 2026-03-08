@@ -1450,6 +1450,55 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
             normalized[name] = hook_point
         self.hook_dict = normalized
 
+    def get_hook_specs(self) -> list:
+        """Return all monitoring hook specs in forward() firing order.
+
+        Used by generate_with_monitoring to install register_forward_hook
+        callbacks and to push_meta in the correct FIFO order.
+        Names match the normalized form produced by _normalize_hook_names.
+        """
+        import torch
+        from monitoring.ring_transport import (
+            HookSpec,
+            HOOK_TYPE_EMBED, HOOK_TYPE_POS_EMBED, HOOK_TYPE_FINAL_LN,
+            HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_K, HOOK_TYPE_V,
+            HOOK_TYPE_Q, HOOK_TYPE_ATTN_SCORES, HOOK_TYPE_PATTERN,
+            HOOK_TYPE_Z, HOOK_TYPE_RESULT, HOOK_TYPE_ATTN_OUT,
+            HOOK_TYPE_RESID_MID, HOOK_TYPE_LN2, HOOK_TYPE_MLP_IN,
+            HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_POST,
+            HOOK_TYPE_TOKEN_IDS, HOOK_TYPE_FINAL_LOGITS,
+        )
+        tr = self.transformer
+        is_eager = (self.config._attn_implementation == "eager")
+        specs = []
+        # token_ids fires first (before embed) — must be first in FIFO
+        specs.append(HookSpec("token_ids",      HOOK_TYPE_TOKEN_IDS, self.token_ids, dtype=torch.long))
+        specs.append(HookSpec("hook_embed",     HOOK_TYPE_EMBED,     tr.hook_embed))
+        specs.append(HookSpec("hook_pos_embed", HOOK_TYPE_POS_EMBED, tr.hook_pos_embed))
+        for i, block in enumerate(tr.h):
+            specs.append(HookSpec(f"blocks.{i}.hook_resid_pre",  HOOK_TYPE_RESID_PRE,  block.hook_resid_pre))
+            specs.append(HookSpec(f"blocks.{i}.hook_ln1",        HOOK_TYPE_LN1,        block.hook_ln1))
+            # Attention: K, V, Q fire in this order in GPT2Attention.forward()
+            specs.append(HookSpec(f"blocks.{i}.attn.hook_k",     HOOK_TYPE_K,          block.attn.hook_k))
+            specs.append(HookSpec(f"blocks.{i}.attn.hook_v",     HOOK_TYPE_V,          block.attn.hook_v))
+            specs.append(HookSpec(f"blocks.{i}.attn.hook_q",     HOOK_TYPE_Q,          block.attn.hook_q))
+            if is_eager:
+                # hook_attn_scores and hook_pattern only fire in eager_attention_forward
+                specs.append(HookSpec(f"blocks.{i}.attn.hook_attn_scores", HOOK_TYPE_ATTN_SCORES, block.attn.hook_attn_scores))
+                specs.append(HookSpec(f"blocks.{i}.attn.hook_pattern",     HOOK_TYPE_PATTERN,     block.attn.hook_pattern))
+            specs.append(HookSpec(f"blocks.{i}.attn.hook_z",      HOOK_TYPE_Z,          block.attn.hook_z))
+            specs.append(HookSpec(f"blocks.{i}.attn.hook_result", HOOK_TYPE_RESULT,     block.attn.hook_result))
+            specs.append(HookSpec(f"blocks.{i}.hook_attn_out",    HOOK_TYPE_ATTN_OUT,   block.hook_attn_out))
+            specs.append(HookSpec(f"blocks.{i}.hook_resid_mid",   HOOK_TYPE_RESID_MID,  block.hook_resid_mid))
+            specs.append(HookSpec(f"blocks.{i}.hook_ln2",         HOOK_TYPE_LN2,        block.hook_ln2))
+            specs.append(HookSpec(f"blocks.{i}.hook_mlp_in",      HOOK_TYPE_MLP_IN,     block.hook_mlp_in))
+            specs.append(HookSpec(f"blocks.{i}.hook_mlp_out",     HOOK_TYPE_MLP_OUT,    block.hook_mlp_out))
+            specs.append(HookSpec(f"blocks.{i}.hook_resid_post",  HOOK_TYPE_RESID_POST, block.hook_resid_post))
+        specs.append(HookSpec("hook_final_ln",  HOOK_TYPE_FINAL_LN,     tr.hook_final_ln))
+        # final_logits fires last — must be last in FIFO
+        specs.append(HookSpec("final_logits",   HOOK_TYPE_FINAL_LOGITS, self.final_logits))
+        return specs
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,

@@ -1472,31 +1472,31 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
         is_eager = (self.config._attn_implementation == "eager")
         specs = []
         # token_ids fires first (before embed) — must be first in FIFO
-        specs.append(HookSpec("token_ids",      HOOK_TYPE_TOKEN_IDS, self.token_ids, dtype=torch.long))
-        specs.append(HookSpec("hook_embed",     HOOK_TYPE_EMBED,     tr.hook_embed))
-        specs.append(HookSpec("hook_pos_embed", HOOK_TYPE_POS_EMBED, tr.hook_pos_embed))
+        specs.append(HookSpec(HOOK_TYPE_TOKEN_IDS, self.token_ids, dtype=torch.long))
+        specs.append(HookSpec(HOOK_TYPE_EMBED,     tr.hook_embed))
+        specs.append(HookSpec(HOOK_TYPE_POS_EMBED, tr.hook_pos_embed))
         for i, block in enumerate(tr.h):
-            specs.append(HookSpec(f"blocks.{i}.hook_resid_pre",  HOOK_TYPE_RESID_PRE,  block.hook_resid_pre))
-            specs.append(HookSpec(f"blocks.{i}.hook_ln1",        HOOK_TYPE_LN1,        block.hook_ln1))
+            specs.append(HookSpec(HOOK_TYPE_RESID_PRE,  block.hook_resid_pre, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_LN1,        block.hook_ln1, layer_no=i))
             # Attention: K, V, Q fire in this order in GPT2Attention.forward()
-            specs.append(HookSpec(f"blocks.{i}.attn.hook_k",     HOOK_TYPE_K,          block.attn.hook_k))
-            specs.append(HookSpec(f"blocks.{i}.attn.hook_v",     HOOK_TYPE_V,          block.attn.hook_v))
-            specs.append(HookSpec(f"blocks.{i}.attn.hook_q",     HOOK_TYPE_Q,          block.attn.hook_q))
+            specs.append(HookSpec(HOOK_TYPE_K,          block.attn.hook_k, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_V,          block.attn.hook_v, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_Q,          block.attn.hook_q, layer_no=i))
             if is_eager:
                 # hook_attn_scores and hook_pattern only fire in eager_attention_forward
-                specs.append(HookSpec(f"blocks.{i}.attn.hook_attn_scores", HOOK_TYPE_ATTN_SCORES, block.attn.hook_attn_scores))
-                specs.append(HookSpec(f"blocks.{i}.attn.hook_pattern",     HOOK_TYPE_PATTERN,     block.attn.hook_pattern))
-            specs.append(HookSpec(f"blocks.{i}.attn.hook_z",      HOOK_TYPE_Z,          block.attn.hook_z))
-            specs.append(HookSpec(f"blocks.{i}.attn.hook_result", HOOK_TYPE_RESULT,     block.attn.hook_result))
-            specs.append(HookSpec(f"blocks.{i}.hook_attn_out",    HOOK_TYPE_ATTN_OUT,   block.hook_attn_out))
-            specs.append(HookSpec(f"blocks.{i}.hook_resid_mid",   HOOK_TYPE_RESID_MID,  block.hook_resid_mid))
-            specs.append(HookSpec(f"blocks.{i}.hook_ln2",         HOOK_TYPE_LN2,        block.hook_ln2))
-            specs.append(HookSpec(f"blocks.{i}.hook_mlp_in",      HOOK_TYPE_MLP_IN,     block.hook_mlp_in))
-            specs.append(HookSpec(f"blocks.{i}.hook_mlp_out",     HOOK_TYPE_MLP_OUT,    block.hook_mlp_out))
-            specs.append(HookSpec(f"blocks.{i}.hook_resid_post",  HOOK_TYPE_RESID_POST, block.hook_resid_post))
-        specs.append(HookSpec("hook_final_ln",  HOOK_TYPE_FINAL_LN,     tr.hook_final_ln))
+                specs.append(HookSpec(HOOK_TYPE_ATTN_SCORES, block.attn.hook_attn_scores, layer_no=i))
+                specs.append(HookSpec(HOOK_TYPE_PATTERN,     block.attn.hook_pattern, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_Z,          block.attn.hook_z, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_RESULT,     block.attn.hook_result, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_ATTN_OUT,   block.hook_attn_out, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_RESID_MID,  block.hook_resid_mid, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_LN2,        block.hook_ln2, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_MLP_IN,     block.hook_mlp_in, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_MLP_OUT,    block.hook_mlp_out, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_RESID_POST, block.hook_resid_post, layer_no=i))
+        specs.append(HookSpec(HOOK_TYPE_FINAL_LN,     tr.hook_final_ln))
         # final_logits fires last — must be last in FIFO
-        specs.append(HookSpec("final_logits",   HOOK_TYPE_FINAL_LOGITS, self.final_logits))
+        specs.append(HookSpec(HOOK_TYPE_FINAL_LOGITS, self.final_logits))
         return specs
 
     def forward(

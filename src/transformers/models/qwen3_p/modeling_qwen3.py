@@ -194,7 +194,7 @@ class Qwen3Attention(nn.Module):
         self.hook_attn_scores = HookPoint()
         self.hook_pattern = HookPoint()
         self.hook_z = HookPoint()
-        self.hook_result = HookPoint()
+        # hook_result removed: attn_out == o_proj output in all architectures
 
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -252,7 +252,7 @@ class Qwen3Attention(nn.Module):
         attn_output = self.hook_z(attn_output)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        attn_output = self.hook_result(attn_output)
+        # result hook removed: attn_out captures the same tensor (o_proj output)
         return attn_output, attn_weights
 
 
@@ -276,7 +276,6 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         self.hook_ln2 = HookPoint()
         self.hook_mlp_in = HookPoint()
         self.hook_mlp_out = HookPoint()
-        self.hook_resid_post = HookPoint()
 
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -318,7 +317,6 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.mlp(mlp_input)
         hidden_states = self.hook_mlp_out(hidden_states)
         hidden_states = residual + hidden_states
-        hidden_states = self.hook_resid_post(hidden_states)
         return hidden_states
 
 
@@ -393,8 +391,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
         self.gradient_checkpointing = False
         self.has_sliding_layers = "sliding_attention" in self.config.layer_types
 
-        # Top-level hook points for embedding and final layer norm
+        # Top-level hook points for embedding, resid_final, and final layer norm
         self.hook_embed = HookPoint()
+        self.hook_resid_final = HookPoint()
         self.hook_final_ln = HookPoint()
 
         # Initialize weights and apply final processing
@@ -468,6 +467,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 **kwargs,
             )
 
+        self.hook_resid_final(hidden_states)
         hidden_states = self.norm(hidden_states)
         hidden_states = self.hook_final_ln(hidden_states)
         return BaseModelOutputWithPast(
@@ -606,9 +606,9 @@ class HookedQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
             HOOK_TYPE_EMBED, HOOK_TYPE_FINAL_LN,
             HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_Q, HOOK_TYPE_K,
             HOOK_TYPE_V, HOOK_TYPE_ATTN_SCORES, HOOK_TYPE_PATTERN,
-            HOOK_TYPE_Z, HOOK_TYPE_RESULT, HOOK_TYPE_ATTN_OUT,
+            HOOK_TYPE_Z, HOOK_TYPE_ATTN_OUT,
             HOOK_TYPE_RESID_MID, HOOK_TYPE_LN2, HOOK_TYPE_MLP_IN,
-            HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_POST,
+            HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_FINAL,
             HOOK_TYPE_TOKEN_IDS, HOOK_TYPE_FINAL_LOGITS,
         )
         m = self.model
@@ -628,13 +628,13 @@ class HookedQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
                 specs.append(HookSpec(HOOK_TYPE_ATTN_SCORES, layer.self_attn.hook_attn_scores, layer_no=i))
                 specs.append(HookSpec(HOOK_TYPE_PATTERN,     layer.self_attn.hook_pattern, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_Z,          layer.self_attn.hook_z, layer_no=i))
-            specs.append(HookSpec(HOOK_TYPE_RESULT,     layer.self_attn.hook_result, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_ATTN_OUT,   layer.hook_attn_out, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_RESID_MID,  layer.hook_resid_mid, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_LN2,        layer.hook_ln2, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_MLP_IN,     layer.hook_mlp_in, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_MLP_OUT,    layer.hook_mlp_out, layer_no=i))
-            specs.append(HookSpec(HOOK_TYPE_RESID_POST, layer.hook_resid_post, layer_no=i))
+        # resid_final: last layer's output before final norm (global hook)
+        specs.append(HookSpec(HOOK_TYPE_RESID_FINAL,  m.hook_resid_final))
         specs.append(HookSpec(HOOK_TYPE_FINAL_LN,     m.hook_final_ln))
         # final_logits fires last — must be last in FIFO
         specs.append(HookSpec(HOOK_TYPE_FINAL_LOGITS, self.final_logits))

@@ -148,7 +148,7 @@ class GPT2Attention(nn.Module):
         self.hook_z = HookPoint()
         self.hook_attn_scores = HookPoint()
         self.hook_pattern = HookPoint()
-        self.hook_result = HookPoint()
+        # hook_result removed: attn_out == o_proj output in all architectures
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -332,7 +332,7 @@ class GPT2Attention(nn.Module):
         attn_output = attn_output.reshape(*attn_output.shape[:-2], -1).contiguous()
         attn_output = self.c_proj(attn_output)
         attn_output = self.resid_dropout(attn_output)
-        attn_output = self.hook_result(attn_output)
+        # result hook removed: attn_out captures the same tensor (o_proj output)
 
         return attn_output, attn_weights
 
@@ -378,7 +378,6 @@ class GPT2Block(GradientCheckpointingLayer):
         self.hook_ln2 = HookPoint()
         self.hook_mlp_in = HookPoint()
         self.hook_mlp_out = HookPoint()
-        self.hook_resid_post = HookPoint()
 
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -440,7 +439,6 @@ class GPT2Block(GradientCheckpointingLayer):
         feed_forward_hidden_states = self.hook_mlp_out(feed_forward_hidden_states)
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
-        hidden_states = self.hook_resid_post(hidden_states)
 
         outputs = (hidden_states,)
         if output_attentions:
@@ -646,6 +644,7 @@ class GPT2Model(GPT2PreTrainedModel):
         # Top-level hook points for embedding and final layer norm
         self.hook_embed = HookPoint()
         self.hook_pos_embed = HookPoint()
+        self.hook_resid_final = HookPoint()
         self.hook_final_ln = HookPoint()
 
         self.gradient_checkpointing = False
@@ -827,6 +826,7 @@ class GPT2Model(GPT2PreTrainedModel):
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (outputs[2],)
 
+        self.hook_resid_final(hidden_states)
         hidden_states = self.ln_f(hidden_states)
         hidden_states = self.hook_final_ln(hidden_states)
 
@@ -1463,9 +1463,9 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
             HOOK_TYPE_EMBED, HOOK_TYPE_POS_EMBED, HOOK_TYPE_FINAL_LN,
             HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_K, HOOK_TYPE_V,
             HOOK_TYPE_Q, HOOK_TYPE_ATTN_SCORES, HOOK_TYPE_PATTERN,
-            HOOK_TYPE_Z, HOOK_TYPE_RESULT, HOOK_TYPE_ATTN_OUT,
+            HOOK_TYPE_Z, HOOK_TYPE_ATTN_OUT,
             HOOK_TYPE_RESID_MID, HOOK_TYPE_LN2, HOOK_TYPE_MLP_IN,
-            HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_POST,
+            HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_FINAL,
             HOOK_TYPE_TOKEN_IDS, HOOK_TYPE_FINAL_LOGITS,
         )
         tr = self.transformer
@@ -1487,13 +1487,13 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
                 specs.append(HookSpec(HOOK_TYPE_ATTN_SCORES, block.attn.hook_attn_scores, layer_no=i))
                 specs.append(HookSpec(HOOK_TYPE_PATTERN,     block.attn.hook_pattern, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_Z,          block.attn.hook_z, layer_no=i))
-            specs.append(HookSpec(HOOK_TYPE_RESULT,     block.attn.hook_result, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_ATTN_OUT,   block.hook_attn_out, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_RESID_MID,  block.hook_resid_mid, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_LN2,        block.hook_ln2, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_MLP_IN,     block.hook_mlp_in, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_MLP_OUT,    block.hook_mlp_out, layer_no=i))
-            specs.append(HookSpec(HOOK_TYPE_RESID_POST, block.hook_resid_post, layer_no=i))
+        # resid_final: last layer's output before final norm (global hook)
+        specs.append(HookSpec(HOOK_TYPE_RESID_FINAL,  tr.hook_resid_final))
         specs.append(HookSpec(HOOK_TYPE_FINAL_LN,     tr.hook_final_ln))
         # final_logits fires last — must be last in FIFO
         specs.append(HookSpec(HOOK_TYPE_FINAL_LOGITS, self.final_logits))

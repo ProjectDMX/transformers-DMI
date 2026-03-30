@@ -345,10 +345,12 @@ class GPT2MLP(nn.Module):
         self.c_proj = Conv1D(embed_dim, intermediate_size)
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
+        self.hook_post = HookPoint()
 
     def forward(self, hidden_states: Optional[tuple[torch.FloatTensor]]) -> torch.FloatTensor:
         hidden_states = self.c_fc(hidden_states)
         hidden_states = self.act(hidden_states)
+        hidden_states = self.hook_post(hidden_states)
         hidden_states = self.c_proj(hidden_states)
         hidden_states = self.dropout(hidden_states)
         return hidden_states
@@ -1465,7 +1467,7 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
             HOOK_TYPE_Q, HOOK_TYPE_ATTN_SCORES, HOOK_TYPE_PATTERN,
             HOOK_TYPE_Z, HOOK_TYPE_ATTN_OUT,
             HOOK_TYPE_RESID_MID, HOOK_TYPE_LN2, HOOK_TYPE_MLP_IN,
-            HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_FINAL,
+            HOOK_TYPE_MLP_POST, HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_FINAL,
             HOOK_TYPE_TOKEN_IDS, HOOK_TYPE_FINAL_LOGITS,
         )
         tr = self.transformer
@@ -1491,6 +1493,7 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
             specs.append(HookSpec(HOOK_TYPE_RESID_MID,  block.hook_resid_mid, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_LN2,        block.hook_ln2, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_MLP_IN,     block.hook_mlp_in, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_MLP_POST,   block.mlp.hook_post, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_MLP_OUT,    block.hook_mlp_out, layer_no=i))
         # resid_final: last layer's output before final norm (global hook)
         specs.append(HookSpec(HOOK_TYPE_RESID_FINAL,  tr.hook_resid_final))

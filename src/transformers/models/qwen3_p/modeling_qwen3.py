@@ -73,10 +73,13 @@ class Qwen3MLP(nn.Module):
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.hook_post = HookPoint()
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        x = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        x = self.hook_post(x)
+        x = self.down_proj(x)
+        return x
 
 
 def rotate_half(x):
@@ -608,7 +611,7 @@ class HookedQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
             HOOK_TYPE_V, HOOK_TYPE_ATTN_SCORES, HOOK_TYPE_PATTERN,
             HOOK_TYPE_Z, HOOK_TYPE_ATTN_OUT,
             HOOK_TYPE_RESID_MID, HOOK_TYPE_LN2, HOOK_TYPE_MLP_IN,
-            HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_FINAL,
+            HOOK_TYPE_MLP_POST, HOOK_TYPE_MLP_OUT, HOOK_TYPE_RESID_FINAL,
             HOOK_TYPE_TOKEN_IDS, HOOK_TYPE_FINAL_LOGITS,
         )
         m = self.model
@@ -632,6 +635,7 @@ class HookedQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
             specs.append(HookSpec(HOOK_TYPE_RESID_MID,  layer.hook_resid_mid, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_LN2,        layer.hook_ln2, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_MLP_IN,     layer.hook_mlp_in, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_MLP_POST,   layer.mlp.hook_post, layer_no=i))
             specs.append(HookSpec(HOOK_TYPE_MLP_OUT,    layer.hook_mlp_out, layer_no=i))
         # resid_final: last layer's output before final norm (global hook)
         specs.append(HookSpec(HOOK_TYPE_RESID_FINAL,  m.hook_resid_final))

@@ -435,7 +435,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         inputs_embeds = self.hook_embed(inputs_embeds)
-        self._buf_embed[:inputs_embeds.shape[0], :inputs_embeds.shape[1]].copy_(inputs_embeds)
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
@@ -446,8 +445,14 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
             )
 
+        # Store cache_position so .copy_() calls in layers use the right offsets.
+        # Prefill: cache_position=[0,1,...,plen-1], decode: cache_position=[t].
+        self._cache_pos = cache_position
+
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
+
+        self._buf_embed[:inputs_embeds.shape[0], :inputs_embeds.shape[1]].copy_(inputs_embeds)
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):

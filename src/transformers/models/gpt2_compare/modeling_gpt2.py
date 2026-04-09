@@ -769,6 +769,8 @@ class GPT2Model(GPT2PreTrainedModel):
             cache_position = torch.arange(
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
             )
+        self._cache_pos = cache_position
+
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 

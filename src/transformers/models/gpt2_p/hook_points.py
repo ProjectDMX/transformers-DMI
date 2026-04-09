@@ -6,7 +6,6 @@ from monitoring.hook_points import (  # noqa: F401
     HookFunction,
     NamesFilter,
     LensHandle,
-    get_monitoring_hook_stats,
 )
 
 __all__ = [
@@ -15,5 +14,4 @@ __all__ = [
     "HookFunction",
     "NamesFilter",
     "LensHandle",
-    "get_monitoring_hook_stats",
 ]

@@ -715,9 +715,13 @@ class CompareQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
         )
 
     def allocate_compare_buffers(
-        self, batch_size: int, max_seq_len: int, dtype: torch.dtype = torch.float16
+        self, batch_size: int, max_seq_len: int, dtype: torch.dtype = torch.float16,
+        tp_size: int = 1,
     ) -> None:
-        """Allocate [batch, max_seq_len, ...] capture buffers for .copy_()."""
+        """Allocate [batch, max_seq_len, ...] capture buffers for .copy_().
+
+        For TP, sharded hook buffers (Q/K/V/Z/mlp_post) are divided by tp_size.
+        """
         config = self.config
         H = config.hidden_size
         nh = config.num_attention_heads
@@ -726,6 +730,10 @@ class CompareQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
         I = config.intermediate_size
         V = config.vocab_size
         B, S = batch_size, max_seq_len
+        tp = tp_size
+        nh_tp = nh // tp
+        nkv_tp = max(1, nkv // tp)
+        I_tp = I // tp
         device = "cuda"
 
         m = self.model
@@ -742,11 +750,11 @@ class CompareQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
             layer._buf_ln2 = torch.empty(B, S, H, device=device, dtype=dtype)
             layer._buf_mlp_in = torch.empty(B, S, H, device=device, dtype=dtype)
             layer._buf_mlp_out = torch.empty(B, S, H, device=device, dtype=dtype)
-            layer.mlp._buf_mlp_post = torch.empty(B, S, I, device=device, dtype=dtype)
-            attn._buf_q = torch.empty(B, S, nh, hd, device=device, dtype=dtype)
-            attn._buf_k = torch.empty(B, S, nkv, hd, device=device, dtype=dtype)
-            attn._buf_v = torch.empty(B, S, nkv, hd, device=device, dtype=dtype)
-            attn._buf_z = torch.empty(B, S, nh, hd, device=device, dtype=dtype)
+            layer.mlp._buf_mlp_post = torch.empty(B, S, I_tp, device=device, dtype=dtype)
+            attn._buf_q = torch.empty(B, S, nh_tp, hd, device=device, dtype=dtype)
+            attn._buf_k = torch.empty(B, S, nkv_tp, hd, device=device, dtype=dtype)
+            attn._buf_v = torch.empty(B, S, nkv_tp, hd, device=device, dtype=dtype)
+            attn._buf_z = torch.empty(B, S, nh_tp, hd, device=device, dtype=dtype)
 
         self._buf_token_ids = torch.empty(B, S, device=device, dtype=torch.long)
         self._buf_final_logits = torch.empty(B, S, V, device=device, dtype=dtype)

@@ -151,11 +151,13 @@ def eager_attention_forward(
 
     if hasattr(module, "hook_attn_scores"):
         attn_weights = module.hook_attn_scores(attn_weights)
+        module._buf_attn_scores[:, :, :attn_weights.shape[2], :attn_weights.shape[3]].copy_(attn_weights)
 
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
 
     if hasattr(module, "hook_pattern"):
         attn_weights = module.hook_pattern(attn_weights)
+        module._buf_pattern[:, :, :attn_weights.shape[2], :attn_weights.shape[3]].copy_(attn_weights)
 
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
     attn_output = torch.matmul(attn_weights, value_states)
@@ -755,6 +757,8 @@ class CompareQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
             attn._buf_k = torch.empty(B, S, nkv_tp, hd, device=device, dtype=dtype)
             attn._buf_v = torch.empty(B, S, nkv_tp, hd, device=device, dtype=dtype)
             attn._buf_z = torch.empty(B, S, nh_tp, hd, device=device, dtype=dtype)
+            attn._buf_attn_scores = torch.empty(B, nh_tp, S, S, device=device, dtype=dtype)
+            attn._buf_pattern = torch.empty(B, nh_tp, S, S, device=device, dtype=dtype)
 
         self._buf_token_ids = torch.empty(B, S, device=device, dtype=torch.long)
         self._buf_final_logits = torch.empty(B, S, V, device=device, dtype=dtype)
@@ -771,7 +775,8 @@ class CompareQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
                          "_buf_resid_mid", "_buf_ln2", "_buf_mlp_in", "_buf_mlp_out"):
                 bufs[f"{attr[5:]}_L{i}"] = getattr(layer, attr)
             bufs[f"mlp_post_L{i}"] = layer.mlp._buf_mlp_post
-            for attr in ("_buf_q", "_buf_k", "_buf_v", "_buf_z"):
+            for attr in ("_buf_q", "_buf_k", "_buf_v", "_buf_z",
+                         "_buf_attn_scores", "_buf_pattern"):
                 bufs[f"{attr[5:]}_L{i}"] = getattr(attn, attr)
         bufs["final_logits"] = self._buf_final_logits
         bufs["token_ids"] = self._buf_token_ids

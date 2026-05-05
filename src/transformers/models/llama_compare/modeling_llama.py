@@ -44,6 +44,7 @@ from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, loggi
 from ...utils.deprecation import deprecate_kwarg
 from ...utils.generic import check_model_inputs
 from .configuration_llama import LlamaConfig
+from monitoring.hook_points import HookPoint, HookedRootModule
 
 
 logger = logging.get_logger(__name__)
@@ -186,7 +187,14 @@ def eager_attention_forward(
         causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         attn_weights = attn_weights + causal_mask
 
+    if hasattr(module, "hook_attn_scores"):
+        attn_weights = module.hook_attn_scores(attn_weights)
+
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+
+    if hasattr(module, "hook_pattern"):
+        attn_weights = module.hook_pattern(attn_weights)
+
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
@@ -495,11 +503,414 @@ class LlamaForQuestionAnswering(GenericForQuestionAnswering, LlamaPreTrainedMode
 class LlamaForTokenClassification(GenericForTokenClassification, LlamaPreTrainedModel): ...
 
 
+class CompareLlamaAttention(LlamaAttention):
+    def __init__(self, config: LlamaConfig, layer_idx: int):
+        super().__init__(config, layer_idx)
+        self.hook_q = HookPoint()
+        self.hook_k = HookPoint()
+        self.hook_v = HookPoint()
+        self.hook_attn_scores = HookPoint()
+        self.hook_pattern = HookPoint()
+        self.hook_z = HookPoint()
+
+    @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states).view(hidden_shape)
+        query_states = self.hook_q(query_states)
+        self._buf_q[:query_states.shape[0], :query_states.shape[1]].copy_(query_states)
+        query_states = query_states.transpose(1, 2)
+
+        key_states = self.k_proj(hidden_states).view(hidden_shape)
+        key_states = self.hook_k(key_states)
+        self._buf_k[:key_states.shape[0], :key_states.shape[1]].copy_(key_states)
+        key_states = key_states.transpose(1, 2)
+
+        value_states = self.v_proj(hidden_states).view(hidden_shape)
+        value_states = self.hook_v(value_states)
+        self._buf_v[:value_states.shape[0], :value_states.shape[1]].copy_(value_states)
+        value_states = value_states.transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if past_key_values is not None:
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        attention_interface: Callable = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            **kwargs,
+        )
+
+        attn_output = self.hook_z(attn_output)
+        self._buf_z[:attn_output.shape[0], :attn_output.shape[1]].copy_(attn_output)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
+
+
+class CompareLlamaDecoderLayer(LlamaDecoderLayer):
+    def __init__(self, config: LlamaConfig, layer_idx: int):
+        GradientCheckpointingLayer.__init__(self)
+        self.hidden_size = config.hidden_size
+        self.self_attn = CompareLlamaAttention(config=config, layer_idx=layer_idx)
+        self.mlp = LlamaMLP(config)
+        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.hook_resid_pre = HookPoint()
+        self.hook_attn_out = HookPoint()
+        self.hook_resid_mid = HookPoint()
+        self.hook_ln1 = HookPoint()
+        self.hook_ln2 = HookPoint()
+        self.hook_mlp_in = HookPoint()
+        self.hook_mlp_out = HookPoint()
+
+    @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.hook_resid_pre(hidden_states)
+        self._buf_resid_pre[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.hook_ln1(hidden_states)
+        self._buf_ln1[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+
+        hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = self.hook_attn_out(hidden_states)
+        self._buf_attn_out[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+        hidden_states = residual + hidden_states
+        hidden_states = self.hook_resid_mid(hidden_states)
+        self._buf_resid_mid[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.hook_ln2(hidden_states)
+        self._buf_ln2[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+        mlp_input = hidden_states
+        hidden_states = self.hook_mlp_in(hidden_states)
+        self._buf_mlp_in[:mlp_input.shape[0], :mlp_input.shape[1]].copy_(mlp_input)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.hook_mlp_out(hidden_states)
+        self._buf_mlp_out[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+
+class CompareLlamaModel(LlamaModel, HookedRootModule):
+    def __init__(self, config: LlamaConfig):
+        LlamaPreTrainedModel.__init__(self, config)
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.layers = nn.ModuleList(
+            [CompareLlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        )
+        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+        self.gradient_checkpointing = False
+
+        self.hook_embed = HookPoint()
+        self.hook_resid_final = HookPoint()
+        self.hook_final_ln = HookPoint()
+
+        self.post_init()
+        self.setup()
+
+    @check_model_inputs
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPast:
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.hook_embed(inputs_embeds)
+            self._buf_embed[:inputs_embeds.shape[0], :inputs_embeds.shape[1]].copy_(inputs_embeds)
+
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache(config=self.config)
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        # Store cache_position so the test runner's StepSaver can pick the
+        # right per-request token range from the .copy_() buffers.
+        # Prefill: cache_position=[0,1,...,plen-1], decode: cache_position=[t].
+        self._cache_pos = cache_position
+
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        causal_mask = create_causal_mask(
+            config=self.config,
+            input_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            cache_position=cache_position,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
+        )
+
+        hidden_states = inputs_embeds
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+            hidden_states = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
+
+        self._buf_resid_final[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+        self.hook_resid_final(hidden_states)
+        self._buf_resid_final[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        hidden_states = self.hook_final_ln(hidden_states)
+        self._buf_final_ln[:hidden_states.shape[0], :hidden_states.shape[1]].copy_(hidden_states)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+        )
+
+
+class CompareLlamaForCausalLM(LlamaForCausalLM, HookedRootModule):
+    def __init__(self, config):
+        LlamaPreTrainedModel.__init__(self, config)
+        self.model = CompareLlamaModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.token_ids = HookPoint()
+        self.final_logits = HookPoint()
+
+        self.post_init()
+        self.setup()
+        self._normalize_hook_names()
+
+    def _normalize_hook_names(self) -> None:
+        normalized_hooks: dict[str, HookPoint] = {}
+        for name, hook_point in list(self.hook_dict.items()):
+            if name.startswith("model."):
+                name = name[len("model.") :]
+            hook_point.name = name
+            normalized_hooks[name] = hook_point
+        self.hook_dict = normalized_hooks
+
+        normalized_mods: dict[str, nn.Module] = {}
+        for name, module in list(self.mod_dict.items()):
+            if name.startswith("model."):
+                name = name[len("model.") :]
+            normalized_mods[name] = module
+        self.mod_dict = normalized_mods
+
+    def get_hook_specs(self) -> list:
+        import torch
+        from monitoring.ring_transport import (
+            HookSpec,
+            HOOK_TYPE_EMBED, HOOK_TYPE_FINAL_LN, HOOK_TYPE_RESID_FINAL,
+            HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_Q, HOOK_TYPE_K,
+            HOOK_TYPE_V, HOOK_TYPE_ATTN_SCORES, HOOK_TYPE_PATTERN,
+            HOOK_TYPE_Z, HOOK_TYPE_ATTN_OUT,
+            HOOK_TYPE_RESID_MID, HOOK_TYPE_LN2, HOOK_TYPE_MLP_IN,
+            HOOK_TYPE_MLP_OUT,
+            HOOK_TYPE_TOKEN_IDS, HOOK_TYPE_FINAL_LOGITS,
+        )
+
+        m = self.model
+        is_eager = (self.config._attn_implementation == "eager")
+        specs = []
+        specs.append(HookSpec(HOOK_TYPE_TOKEN_IDS, self.token_ids, dtype=torch.long))
+        specs.append(HookSpec(HOOK_TYPE_EMBED, m.hook_embed))
+        for i, layer in enumerate(m.layers):
+            specs.append(HookSpec(HOOK_TYPE_RESID_PRE, layer.hook_resid_pre, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_LN1, layer.hook_ln1, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_Q, layer.self_attn.hook_q, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_K, layer.self_attn.hook_k, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_V, layer.self_attn.hook_v, layer_no=i))
+            if is_eager:
+                specs.append(HookSpec(HOOK_TYPE_ATTN_SCORES, layer.self_attn.hook_attn_scores, layer_no=i))
+                specs.append(HookSpec(HOOK_TYPE_PATTERN, layer.self_attn.hook_pattern, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_Z, layer.self_attn.hook_z, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_ATTN_OUT, layer.hook_attn_out, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_RESID_MID, layer.hook_resid_mid, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_LN2, layer.hook_ln2, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_MLP_IN, layer.hook_mlp_in, layer_no=i))
+            specs.append(HookSpec(HOOK_TYPE_MLP_OUT, layer.hook_mlp_out, layer_no=i))
+        specs.append(HookSpec(HOOK_TYPE_RESID_FINAL, m.hook_resid_final))
+        specs.append(HookSpec(HOOK_TYPE_FINAL_LN, m.hook_final_ln))
+        specs.append(HookSpec(HOOK_TYPE_FINAL_LOGITS, self.final_logits))
+        return specs
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> CausalLMOutputWithPast:
+        if input_ids is not None:
+            input_ids = self.token_ids(input_ids)
+            self._buf_token_ids[:input_ids.shape[0], :input_ids.shape[1]].copy_(input_ids)
+
+        outputs: BaseModelOutputWithPast = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self.final_logits(logits)
+        self._buf_final_logits[:logits.shape[0], :logits.shape[1]].copy_(logits)
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+    def allocate_compare_buffers(
+        self, batch_size: int, max_seq_len: int, dtype: torch.dtype = torch.float16,
+        tp_size: int = 1,
+    ) -> None:
+        """Allocate [batch, max_seq_len, ...] capture buffers for .copy_().
+
+        For TP, sharded hook buffers (Q/K/V/Z) are divided by tp_size; the
+        K/V buffers use max(1, num_kv_heads // tp_size) to match GQA's
+        replication when tp_size > num_kv_heads.
+        """
+        config = self.config
+        H = config.hidden_size
+        nh = config.num_attention_heads
+        nkv = config.num_key_value_heads
+        hd = getattr(config, "head_dim", None) or H // nh
+        V = config.vocab_size
+        B, S = batch_size, max_seq_len
+        tp = tp_size
+        nh_tp = nh // tp
+        nkv_tp = max(1, nkv // tp)
+        device = "cuda"
+
+        m = self.model
+        m._buf_embed = torch.empty(B, S, H, device=device, dtype=dtype)
+        m._buf_resid_final = torch.empty(B, S, H, device=device, dtype=dtype)
+        m._buf_final_ln = torch.empty(B, S, H, device=device, dtype=dtype)
+
+        for layer in m.layers:
+            attn = layer.self_attn
+            layer._buf_resid_pre = torch.empty(B, S, H, device=device, dtype=dtype)
+            layer._buf_ln1 = torch.empty(B, S, H, device=device, dtype=dtype)
+            layer._buf_attn_out = torch.empty(B, S, H, device=device, dtype=dtype)
+            layer._buf_resid_mid = torch.empty(B, S, H, device=device, dtype=dtype)
+            layer._buf_ln2 = torch.empty(B, S, H, device=device, dtype=dtype)
+            layer._buf_mlp_in = torch.empty(B, S, H, device=device, dtype=dtype)
+            layer._buf_mlp_out = torch.empty(B, S, H, device=device, dtype=dtype)
+            attn._buf_q = torch.empty(B, S, nh_tp, hd, device=device, dtype=dtype)
+            attn._buf_k = torch.empty(B, S, nkv_tp, hd, device=device, dtype=dtype)
+            attn._buf_v = torch.empty(B, S, nkv_tp, hd, device=device, dtype=dtype)
+            attn._buf_z = torch.empty(B, S, nh_tp, hd, device=device, dtype=dtype)
+
+        self._buf_token_ids = torch.empty(B, S, device=device, dtype=torch.long)
+        self._buf_final_logits = torch.empty(B, S, V, device=device, dtype=dtype)
+
+    def get_ref_buffers(self) -> dict[str, torch.Tensor]:
+        """Return {name: buffer} for all allocated compare buffers."""
+        bufs: dict[str, torch.Tensor] = {}
+        m = self.model
+        for attr in ("_buf_embed", "_buf_resid_final", "_buf_final_ln"):
+            bufs[attr[5:]] = getattr(m, attr)
+        for i, layer in enumerate(m.layers):
+            attn = layer.self_attn
+            for attr in ("_buf_resid_pre", "_buf_ln1", "_buf_attn_out",
+                         "_buf_resid_mid", "_buf_ln2", "_buf_mlp_in", "_buf_mlp_out"):
+                bufs[f"{attr[5:]}_L{i}"] = getattr(layer, attr)
+            for attr in ("_buf_q", "_buf_k", "_buf_v", "_buf_z"):
+                bufs[f"{attr[5:]}_L{i}"] = getattr(attn, attr)
+        bufs["final_logits"] = self._buf_final_logits
+        bufs["token_ids"] = self._buf_token_ids
+        return bufs
+
+
 __all__ = [
-    "LlamaForCausalLM",
-    "LlamaModel",
+    "CompareLlamaAttention",
+    "CompareLlamaDecoderLayer",
+    "CompareLlamaForCausalLM",
+    "CompareLlamaModel",
     "LlamaPreTrainedModel",
-    "LlamaForSequenceClassification",
-    "LlamaForQuestionAnswering",
-    "LlamaForTokenClassification",
 ]

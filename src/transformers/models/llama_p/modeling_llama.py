@@ -75,7 +75,7 @@ class HookedLlamaAttention(LlamaAttention):
         self.hook_attn_scores = HookPoint()
         self.hook_pattern = HookPoint()
         self.hook_z = HookPoint()
-        self.hook_result = HookPoint()
+        # hook_result removed: attn_out == o_proj output in all architectures
 
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -127,7 +127,6 @@ class HookedLlamaAttention(LlamaAttention):
         attn_output = self.hook_z(attn_output)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        attn_output = self.hook_result(attn_output)
         return attn_output, attn_weights
 
 
@@ -148,7 +147,7 @@ class HookedLlamaDecoderLayer(LlamaDecoderLayer):
         self.hook_ln2 = HookPoint()
         self.hook_mlp_in = HookPoint()
         self.hook_mlp_out = HookPoint()
-        self.hook_resid_post = HookPoint()
+        # hook_resid_post removed: equivalent to next layer's hook_resid_pre
 
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -188,7 +187,6 @@ class HookedLlamaDecoderLayer(LlamaDecoderLayer):
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.hook_mlp_out(hidden_states)
         hidden_states = residual + hidden_states
-        hidden_states = self.hook_resid_post(hidden_states)
         return hidden_states
 
 

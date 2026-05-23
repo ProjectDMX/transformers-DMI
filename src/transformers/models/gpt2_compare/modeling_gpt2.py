@@ -1442,7 +1442,6 @@ class CompareGPT2Model(GPT2Model, HookedRootModule):
             if name.startswith("h."):
                 # Drop legacy TL alias names
                 continue
-            hook_point.name = name
             normalized[name] = hook_point
         self.hook_dict = normalized
 
@@ -1468,7 +1467,6 @@ class CompareGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
             if name.startswith("h."):
                 # Drop legacy TL alias names
                 continue
-            hook_point.name = name
             normalized[name] = hook_point
         self.hook_dict = normalized
 
@@ -1598,6 +1596,14 @@ class CompareGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
         """Allocate [batch, max_seq_len, ...] capture buffers for .copy_().
 
         For TP, sharded hook buffers (Q/K/V/Z/mlp_post) are divided by tp_size.
+
+        Note on gpt2 + tp>1: GPT2Config declares no `base_model_tp_plan`
+        and gpt2's c_attn / c_proj are Conv1D (not nn.Linear), so HF's
+        auto-TP cannot shard them.  Each rank runs the full attention
+        redundantly.  Passing tp_size>1 here will mis-size the K/V/Q/Z
+        buffers and raise at the first `.copy_()`; callers should pass
+        tp_size=1 for gpt2 regardless of the world size, or omit gpt2
+        from tp>1 test cells.
         """
         config = self.config
         H = config.hidden_size

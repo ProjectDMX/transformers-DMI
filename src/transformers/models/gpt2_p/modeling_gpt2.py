@@ -1422,7 +1422,6 @@ class HookedGPT2Model(GPT2Model, HookedRootModule):
             if name.startswith("h."):
                 # Drop legacy TL alias names
                 continue
-            hook_point.name = name
             normalized[name] = hook_point
         self.hook_dict = normalized
 
@@ -1448,7 +1447,6 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
             if name.startswith("h."):
                 # Drop legacy TL alias names
                 continue
-            hook_point.name = name
             normalized[name] = hook_point
         self.hook_dict = normalized
 

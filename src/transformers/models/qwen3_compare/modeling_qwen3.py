@@ -609,7 +609,6 @@ class CompareQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
         for name, hook_point in list(self.hook_dict.items()):
             if name.startswith("model."):
                 name = name[len("model.") :]
-            hook_point.name = name
             normalized_hooks[name] = hook_point
         self.hook_dict = normalized_hooks
 

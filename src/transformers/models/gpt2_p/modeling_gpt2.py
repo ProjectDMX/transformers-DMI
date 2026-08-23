@@ -1458,7 +1458,7 @@ class HookedGPT2LMHeadModel(GPT2LMHeadModel, HookedRootModule):
         Names match the normalized form produced by _normalize_hook_names.
         """
         import torch
-        from monitoring.ring_transport import (
+        from dmi.transport.ring import (
             HookSpec,
             HOOK_TYPE_EMBED, HOOK_TYPE_POS_EMBED, HOOK_TYPE_FINAL_LN,
             HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_K, HOOK_TYPE_V,

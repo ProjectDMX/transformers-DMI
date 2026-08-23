@@ -44,7 +44,7 @@ from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, loggi
 from ...utils.deprecation import deprecate_kwarg
 from ...utils.generic import check_model_inputs
 from .configuration_llama import LlamaConfig
-from monitoring.hook_points import HookPoint, HookedRootModule
+from dmi.hooks.point import HookPoint, HookedRootModule
 
 
 logger = logging.get_logger(__name__)
@@ -760,7 +760,7 @@ class CompareLlamaForCausalLM(LlamaForCausalLM, HookedRootModule):
 
     def get_hook_specs(self) -> list:
         import torch
-        from monitoring.ring_transport import (
+        from dmi.transport.ring import (
             HookSpec,
             HOOK_TYPE_EMBED, HOOK_TYPE_FINAL_LN, HOOK_TYPE_RESID_FINAL,
             HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_Q, HOOK_TYPE_K,

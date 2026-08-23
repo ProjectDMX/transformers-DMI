@@ -41,7 +41,7 @@ from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
 from ...utils.deprecation import deprecate_kwarg
 from ...utils.generic import check_model_inputs
 from .configuration_qwen3 import Qwen3Config
-from monitoring.hook_points import HookPoint, HookedRootModule
+from dmi.hooks.point import HookPoint, HookedRootModule
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -627,7 +627,7 @@ class CompareQwen3ForCausalLM(Qwen3ForCausalLM, HookedRootModule):
         Names match the normalized form produced by _normalize_hook_names.
         """
         import torch
-        from monitoring.ring_transport import (
+        from dmi.transport.ring import (
             HookSpec,
             HOOK_TYPE_EMBED, HOOK_TYPE_FINAL_LN,
             HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_Q, HOOK_TYPE_K,

@@ -28,7 +28,7 @@ from ..llama.modeling_llama import (
     apply_rotary_pos_emb,
     repeat_kv,
 )
-from monitoring.hook_points import HookPoint, HookedRootModule
+from dmi.hooks.point import HookPoint, HookedRootModule
 
 
 # Local copy of eager_attention_forward with hook_attn_scores /
@@ -305,7 +305,7 @@ class HookedLlamaForCausalLM(LlamaForCausalLM, HookedRootModule):
 
     def get_hook_specs(self) -> list:
         import torch
-        from monitoring.ring_transport import (
+        from dmi.transport.ring import (
             HookSpec,
             HOOK_TYPE_EMBED, HOOK_TYPE_FINAL_LN, HOOK_TYPE_RESID_FINAL,
             HOOK_TYPE_RESID_PRE, HOOK_TYPE_LN1, HOOK_TYPE_Q, HOOK_TYPE_K,

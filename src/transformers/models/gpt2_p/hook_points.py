@@ -1,6 +1,6 @@
-"""Compatibility shim for hook points (moved to monitoring.hook_points)."""
+"""Compatibility shim for DMI hook points."""
 
-from monitoring.hook_points import (  # noqa: F401
+from dmi.hooks.point import (  # noqa: F401
     HookPoint,
     HookedRootModule,
     HookFunction,
